@@ -134,31 +134,27 @@ assert-main-branch() (
   fi
 )
 
-# Host-aware Azure DevOps PAT validation
+
 azdo_pat_check() (
   set -euo pipefail
 
+  # Determine host/org/project/repo using existing helper
   read -r host organization project _repo <<< "$(get-git-remote-details)"
 
-  local domain personal_access_token
+  # Resolve domain and local PAT (do not mutate global env vars)
+  local domain personal_access_token api_version="7.0"
   if [[ "$host" == "azure-devops-server" ]]; then
     domain="azuredevops.logixhealth.com"
-    if [[ -z "${AZDO_PERSONAL_ACCESS_TOKEN_SERVER:-}" ]] && [[ -n "${AZDO_PERSONAL_ACCESS_TOKEN:-}" ]]; then
-      AZDO_PERSONAL_ACCESS_TOKEN_SERVER="$AZDO_PERSONAL_ACCESS_TOKEN"
-    fi
-    personal_access_token="${AZDO_PERSONAL_ACCESS_TOKEN_SERVER:-}"
+    personal_access_token="${AZDO_PERSONAL_ACCESS_TOKEN_SERVER:-${AZDO_PERSONAL_ACCESS_TOKEN:-}}"
     if [[ -z "$personal_access_token" ]]; then
-      echo "❌ PAT missing: set AZDO_PERSONAL_ACCESS_TOKEN_SERVER for on-prem server." >&2
+      echo "❌ PAT missing: set AZDO_PERSONAL_ACCESS_TOKEN_SERVER (or AZDO_PERSONAL_ACCESS_TOKEN fallback) for on-prem server." >&2
       return 1
     fi
   elif [[ "$host" == "azure-devops-services" ]]; then
     domain="dev.azure.com"
-    if [[ -z "${AZDO_PERSONAL_ACCESS_TOKEN_SERVICES:-}" ]] && [[ -n "${AZDO_PERSONAL_ACCESS_TOKEN:-}" ]]; then
-      AZDO_PERSONAL_ACCESS_TOKEN_SERVICES="$AZDO_PERSONAL_ACCESS_TOKEN"
-    fi
-    personal_access_token="${AZDO_PERSONAL_ACCESS_TOKEN_SERVICES:-}"
+    personal_access_token="${AZDO_PERSONAL_ACCESS_TOKEN_SERVICES:-${AZDO_PERSONAL_ACCESS_TOKEN:-}}"
     if [[ -z "$personal_access_token" ]]; then
-      echo "❌ PAT missing: set AZDO_PERSONAL_ACCESS_TOKEN_SERVICES for Azure DevOps Services." >&2
+      echo "❌ PAT missing: set AZDO_PERSONAL_ACCESS_TOKEN_SERVICES (or AZDO_PERSONAL_ACCESS_TOKEN fallback) for Azure DevOps Services." >&2
       return 1
     fi
   else
@@ -166,42 +162,27 @@ azdo_pat_check() (
     return 1
   fi
 
-  # newline/whitespace guard
-  if printf '%s' "$personal_access_token" | grep -q $'\n'; then
-    echo "❌ PAT contains newline(s). Re-export without extra whitespace." >&2
-    return 1
-  fi
-
-  local api_version="7.0"
-  local url
-  if [[ "$host" == "azure-devops-server" ]]; then
-    url="https://${domain}/${organization}/_apis/projects?api-version=${api_version}"
-  else
-    # Services URL pattern
-    url="https://${domain}/${organization}/_apis/projects?api-version=${api_version}"
-  fi
-
-  # Try a minimal authenticated GET and surface server errors
+  # Minimal API call to validate PAT
+  local url="https://${domain}/${organization}/_apis/projects?api-version=${api_version}"
   local headers_file
   headers_file="$(mktemp)"
   trap 'rm -f "$headers_file"' EXIT
+
   if ! curl --silent --fail --show-error --location \
-    --user ":$personal_access_token" \
-    --dump-header "$headers_file" \
-    "$url" > /dev/null; then
-    # Try to decode X-TFS-ServiceError if provided
-    local reason
-    reason="$(grep -i '^x-tfs-serviceerror:' "$headers_file" | sed 's/^x-tfs-serviceerror:[[:space:]]*//I')"
-    if [[ -n "$reason" ]]; then
-      # decode percent-encoding
-      reason="$(
-        python - << 'PY'
+       --user ":$personal_access_token" \
+       --dump-header "$headers_file" \
+       "$url" >/dev/null; then
+
+    # Try to surface server's reason (e.g., expired PAT)
+    local reason_raw decoded_reason
+    reason_raw="$(grep -i '^x-tfs-serviceerror:' "$headers_file" | sed 's/^x-tfs-serviceerror:[[:space:]]*//I')"
+    if [[ -n "$reason_raw" ]]; then
+      decoded_reason="$(python - <<'PY'
 import sys, urllib.parse
 print(urllib.parse.unquote(sys.stdin.read().strip()))
 PY
-        <<< "$reason"
-      )"
-      echo "❌ Azure DevOps auth failed: ${reason}" >&2
+<<< "$reason_raw")"
+      echo "❌ Azure DevOps auth failed: ${decoded_reason}" >&2
     else
       echo "❌ Azure DevOps auth failed (check PAT validity/scopes/expiry)." >&2
     fi
@@ -216,6 +197,8 @@ PY
 
   echo "✅ Azure DevOps PAT valid ($host)"
 )
+``
+
 
 # This will echo back the same input if the input is not a number.
 get-branch-name-from-number() (
@@ -2037,11 +2020,6 @@ gpr() (
   assert-in-git-repository
   assert-feature-branch
 
-  # After: host/org/project/repository and personal_access_token determination
-  if ! azdo_pat_check; then
-    return 1
-  fi
-
   local branch_name
   branch_name=$(git branch --show-current)
 
@@ -2066,6 +2044,12 @@ gpr() (
   read -r host organization project repository <<< "$(get-git-remote-details)"
   if [[ "$host" != "azure-devops-server" ]] && [[ "$host" != "azure-devops-services" ]]; then
     echo "Error: The ${FUNCNAME[0]} command cannot be used with host: $host" >&2
+    return 1
+  fi
+
+
+  # Preflight: validate PAT for the detected host (Server/Services) before continuing
+  if ! azdo_pat_check; then
     return 1
   fi
 
