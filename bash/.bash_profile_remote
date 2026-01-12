@@ -134,7 +134,6 @@ assert-main-branch() (
   fi
 )
 
-
 # Host-aware Azure DevOps PAT validation
 azdo_pat_check() (
   set -euo pipefail
@@ -183,22 +182,25 @@ azdo_pat_check() (
   fi
 
   # Try a minimal authenticated GET and surface server errors
-  local headers_file; headers_file="$(mktemp)"
+  local headers_file
+  headers_file="$(mktemp)"
   trap 'rm -f "$headers_file"' EXIT
   if ! curl --silent --fail --show-error --location \
-       --user ":$personal_access_token" \
-       --dump-header "$headers_file" \
-       "$url" >/dev/null; then
+    --user ":$personal_access_token" \
+    --dump-header "$headers_file" \
+    "$url" > /dev/null; then
     # Try to decode X-TFS-ServiceError if provided
     local reason
     reason="$(grep -i '^x-tfs-serviceerror:' "$headers_file" | sed 's/^x-tfs-serviceerror:[[:space:]]*//I')"
     if [[ -n "$reason" ]]; then
       # decode percent-encoding
-      reason="$(python - <<'PY'
+      reason="$(
+        python - << 'PY'
 import sys, urllib.parse
 print(urllib.parse.unquote(sys.stdin.read().strip()))
 PY
-<<<"$reason")"
+        <<< "$reason"
+      )"
       echo "❌ Azure DevOps auth failed: ${reason}" >&2
     else
       echo "❌ Azure DevOps auth failed (check PAT validity/scopes/expiry)." >&2
@@ -2034,7 +2036,6 @@ gpr() (
 
   assert-in-git-repository
   assert-feature-branch
-
 
   # After: host/org/project/repository and personal_access_token determination
   if ! azdo_pat_check; then
